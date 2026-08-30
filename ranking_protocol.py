@@ -6,6 +6,9 @@ import pymongo
 import redis
 from typing import Callable
 import functools
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RankingManager:
@@ -37,9 +40,27 @@ class RankingManager:
             return sum
         """)
 
-        # rks = list(self.rankings_db.find({}))
-        # for rk in rks:
-        #     self.set_score_for_pid_ex(rk["pid"], rk, 0, True)
+    def rebuild_leaderboards(self) -> dict[int, int]:
+        """Rebuild the Redis leaderboard sets from MongoDB. Read-only on Mongo,
+        safe to re-run. Returns {category: rows}."""
+        results = {}
+        for category in self.rankings_db.distinct("category"):
+            main_key = self.get_redis_member_name(category)
+            uniq_key = self.get_redis_member_name(category, True)
+
+            pipe = self.redis_db.pipeline()
+            pipe.delete(main_key, uniq_key)
+            count = 0
+            for rk in self.rankings_db.find({"category": category}, {"_id": 1, "score": 1}):
+                pipe.zadd(main_key, {str(rk["_id"]): rk["score"]})
+                pipe.zadd(uniq_key, {str(rk["score"]): 1}, incr=True)
+                count += 1
+            pipe.execute()
+
+            results[category] = count
+            logger.info("Ranking rebuild: category %d -> %d scores", category, count)
+
+        return results
 
     def get_redis_member_name(self, category: int, unique: bool = False):
         if unique:
